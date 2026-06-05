@@ -1,0 +1,62 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>whimper ♡ status</title>
+    <meta name="description" content="Live status and uptime for whimper.wtf services.">
+    <link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'><text y='.9em' font-size='90'>♡</text></svg>">
+    <link rel="stylesheet" href="/status.css">
+</head>
+<body>
+    <div class="grid-bg" aria-hidden="true"></div>
+
+    <header class="header glass">
+        <div class="header-inner">
+            <a href="https://whimper.wtf" class="brand">
+                <span class="brand-mark">♡</span>
+                <span>whimper<span class="muted">.wtf</span></span>
+            </a>
+            <div id="overall-badge" class="badge badge-unknown">Checking…</div>
+        </div>
+    </header>
+
+    <main class="main">
+        <section class="hero">
+            <p class="eyebrow">system status</p>
+            <h1>everything quiet?</h1>
+            <p class="subtitle">
+                live health and uptime for whimper services — checked every minute.
+            </p>
+            <p class="meta">last updated <span id="updated-at">—</span></p>
+        </section>
+
+        <section class="summary glass" id="summary">
+            <div class="summary-stat">
+                <span class="label">7-day uptime</span>
+                <span class="value" id="avg-uptime-7d">—</span>
+            </div>
+            <div class="summary-stat">
+                <span class="label">services online</span>
+                <span class="value" id="services-online">—</span>
+            </div>
+            <div class="summary-stat">
+                <span class="label">api uptime</span>
+                <span class="value" id="api-uptime">—</span>
+            </div>
+        </section>
+
+        <section class="services" id="services" aria-live="polite">
+            <p class="loading">loading status…</p>
+        </section>
+    </main>
+
+    <footer class="footer">
+        <a href="https://whimper.wtf">← back to whimper.wtf</a>
+        <span class="dot">·</span>
+        <a href="/api/status">json</a>
+    </footer>
+
+    <script src="/status.js"></script>
+</body>
+</html>
