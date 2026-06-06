@@ -15,61 +15,122 @@ const OWNER_META: Record<string, { role: string; fallbackName: string }> = {
     "792653373458743306":  { role: "Manager",                     fallbackName: "Manager"  },
 };
 
+// Cache the whole owners response for 60s so we don't hammer Lanyard/Discord/Mongo on every visit.
+const OWNERS_CACHE_MS = 60_000;
+let ownersCache: { body: any; expiresAt: number } | null = null;
+
+const LEADERBOARD_CACHE_MS = 45_000;
+const leaderboardCache = new Map<number, { body: any; expiresAt: number }>();
+
+const OWNERS_CACHE_MS_USER = 24 * 60 * 60 * 1000; // 24h — cached Discord user lookups
+
+async function resolveOwner(discordId: string) {
+    const meta = OWNER_META[discordId] ?? { role: "Staff", fallbackName: "Staff" };
+
+    // 1) Lanyard first — gives live presence + identity without bot token.
+    const lan = await fetchLanyardPresence(discordId);
+    if (lan?.discord_user) {
+        const u = lan.discord_user;
+        // Persist identity to mongo so leaderboard / future calls have it.
+        await collections.users().updateOne(
+            { discordId: u.id },
+            { $set: { discordId: u.id, username: u.username, globalName: u.global_name ?? u.username, avatar: u.avatar, updatedAt: new Date() } },
+            { upsert: true }
+        ).catch(() => {});
+        return {
+            discordId: u.id,
+            username: u.username,
+            globalName: u.global_name || u.username,
+            avatar: buildOwnerAvatar(u.id, u.avatar),
+            avatarHash: u.avatar,
+            role: meta.role,
+            status: lan.discord_status,
+            activities: lan.activities ?? [],
+            spotify: lan.spotify ?? null,
+        };
+    }
+
+    // 2) Cached Mongo user doc (populated by previous Lanyard/Discord hits, leaderboard, OAuth login).
+    const cached = await collections.users().findOne({ discordId }).catch(() => null);
+    const cachedFresh = cached?.updatedAt && (Date.now() - new Date(cached.updatedAt).getTime() < OWNERS_CACHE_MS_USER);
+    if (cached?.username && cachedFresh) {
+        return {
+            discordId,
+            username: cached.username,
+            globalName: cached.globalName || cached.username,
+            avatar: buildOwnerAvatar(discordId, cached.avatar ?? null),
+            avatarHash: cached.avatar ?? null,
+            role: meta.role,
+            status: "offline" as const,
+            activities: [],
+            spotify: null,
+        };
+    }
+
+    // 3) Discord bot API (requires DISCORD_BOT_TOKEN).
+    if (process.env.DISCORD_BOT_TOKEN) {
+        const user = await fetchDiscordUser(discordId).catch(() => null);
+        if (user) {
+            await collections.users().updateOne(
+                { discordId: user.id },
+                { $set: { discordId: user.id, username: user.username, globalName: user.global_name ?? user.username, avatar: user.avatar ?? null, updatedAt: new Date() } },
+                { upsert: true }
+            ).catch(() => {});
+            return {
+                discordId: user.id,
+                username: user.username,
+                globalName: user.global_name || user.username,
+                avatar: buildOwnerAvatar(discordId, user.avatar ?? null),
+                avatarHash: user.avatar ?? null,
+                role: meta.role,
+                status: "offline" as const,
+                activities: [],
+                spotify: null,
+            };
+        }
+    } else {
+        console.warn("[owners] DISCORD_BOT_TOKEN not set — falling back to stale/placeholder for", discordId);
+    }
+
+    // 4) Stale mongo cache (any age) is still better than a placeholder.
+    if (cached?.username) {
+        return {
+            discordId,
+            username: cached.username,
+            globalName: cached.globalName || cached.username,
+            avatar: buildOwnerAvatar(discordId, cached.avatar ?? null),
+            avatarHash: cached.avatar ?? null,
+            role: meta.role,
+            status: "offline" as const,
+            activities: [],
+            spotify: null,
+        };
+    }
+
+    // 5) Last resort — static.
+    return {
+        discordId,
+        username: meta.fallbackName,
+        globalName: meta.fallbackName,
+        avatar: defaultEmbedAvatar(discordId),
+        avatarHash: null,
+        role: meta.role,
+        status: "offline" as const,
+        activities: [],
+        spotify: null,
+    };
+}
+
 export async function getOwners(req: Request, res: Response) {
     try {
-        const owners = await Promise.all(
-            OWNER_IDS.map(async (discordId) => {
-                const meta = OWNER_META[discordId] ?? { role: "Staff", fallbackName: "Staff" };
-
-                // 1) Lanyard first (gives live presence + identity, no bot token needed)
-                const lan = await fetchLanyardPresence(discordId);
-                if (lan?.discord_user) {
-                    const u = lan.discord_user;
-                    return {
-                        discordId: u.id,
-                        username: u.username,
-                        globalName: u.global_name || u.username,
-                        avatar: buildOwnerAvatar(u.id, u.avatar),
-                        avatarHash: u.avatar,
-                        role: meta.role,
-                        status: lan.discord_status,
-                        activities: lan.activities ?? [],
-                        spotify: lan.spotify ?? null,
-                    };
-                }
-
-                // 2) Discord bot API fallback (no live presence)
-                const user = await fetchDiscordUser(discordId);
-                if (user) {
-                    return {
-                        discordId: user.id,
-                        username: user.username,
-                        globalName: user.global_name || user.username,
-                        avatar: buildOwnerAvatar(discordId, user.avatar ?? null),
-                        avatarHash: user.avatar ?? null,
-                        role: meta.role,
-                        status: "offline" as const,
-                        activities: [],
-                        spotify: null,
-                    };
-                }
-
-                // 3) Static fallback
-                return {
-                    discordId,
-                    username: meta.fallbackName,
-                    globalName: meta.fallbackName,
-                    avatar: defaultEmbedAvatar(discordId),
-                    avatarHash: null,
-                    role: meta.role,
-                    status: "offline" as const,
-                    activities: [],
-                    spotify: null,
-                };
-            })
-        );
-
-        res.json({ success: true, owners });
+        if (ownersCache && Date.now() < ownersCache.expiresAt) {
+            return res.json(ownersCache.body);
+        }
+        const owners = await Promise.all(OWNER_IDS.map(resolveOwner));
+        const body = { success: true, owners };
+        ownersCache = { body, expiresAt: Date.now() + OWNERS_CACHE_MS };
+        res.set("Cache-Control", "public, max-age=60");
+        res.json(body);
     } catch (e) {
         console.error(e);
         res.status(500).json({ success: false, error: "Failed to fetch owners" });
@@ -117,6 +178,12 @@ export async function getLeaderboard(req: Request, res: Response) {
     try {
         const limit = Math.min(100, Math.max(1, parseInt(req.query.limit as string) || 10));
 
+        const hit = leaderboardCache.get(limit);
+        if (hit && Date.now() < hit.expiresAt) {
+            res.set("Cache-Control", "public, max-age=45");
+            return res.json(hit.body);
+        }
+
         const topRep = await collections.reputation()
             .find({})
             .sort({ reputation: -1 })
@@ -162,7 +229,10 @@ export async function getLeaderboard(req: Request, res: Response) {
             })
         );
 
-        res.json({ success: true, leaderboard: enriched });
+        const body = { success: true, leaderboard: enriched };
+        leaderboardCache.set(limit, { body, expiresAt: Date.now() + LEADERBOARD_CACHE_MS });
+        res.set("Cache-Control", "public, max-age=45");
+        res.json(body);
     } catch (e) {
         console.error(e);
         res.status(500).json({ success: false, error: "Failed to fetch leaderboard" });
