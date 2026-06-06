@@ -12,7 +12,9 @@ async function start() {
     } catch (e) {
         console.error("⚠️  Starting without MongoDB:", (e as Error).message);
     }
-    const PORT = process.env.PORT || 3000;
+    const argPortIdx = process.argv.indexOf("--port");
+    const argPort = argPortIdx !== -1 ? process.argv[argPortIdx + 1] : undefined;
+    const PORT = argPort || process.env.PORT || 3000;
     app.listen(PORT, () => {
         console.log(`🚀 Server running on port ${PORT}`);
     });
