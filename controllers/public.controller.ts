@@ -3,6 +3,7 @@ import { collections } from "../services/mongo.service";
 import { fetchDiscordUser } from "../services/discord.service";
 import { buildAvatarUrl } from "../services/discord.service";
 import { getCachedStats } from "../services/cache.service";
+import { fetchLanyardPresence } from "../services/lanyard.service";
 import { OWNER_IDS } from "../config";
 
 // Per-owner display metadata
@@ -19,32 +20,51 @@ export async function getOwners(req: Request, res: Response) {
         const owners = await Promise.all(
             OWNER_IDS.map(async (discordId) => {
                 const meta = OWNER_META[discordId] ?? { role: "Staff", fallbackName: "Staff" };
-                const user = await fetchDiscordUser(discordId);
 
-                if (!user) {
+                // 1) Lanyard first (gives live presence + identity, no bot token needed)
+                const lan = await fetchLanyardPresence(discordId);
+                if (lan?.discord_user) {
+                    const u = lan.discord_user;
                     return {
-                        discordId,
-                        username: meta.fallbackName,
-                        globalName: meta.fallbackName,
-                        avatar: `https://cdn.discordapp.com/embed/avatars/${
-                            Number(BigInt(discordId) >> 22n) % 6
-                        }.png`,
+                        discordId: u.id,
+                        username: u.username,
+                        globalName: u.global_name || u.username,
+                        avatar: buildOwnerAvatar(u.id, u.avatar),
+                        avatarHash: u.avatar,
                         role: meta.role,
+                        status: lan.discord_status,
+                        activities: lan.activities ?? [],
+                        spotify: lan.spotify ?? null,
                     };
                 }
 
-                const ext = user.avatar?.startsWith("a_") ? "gif" : "webp";
+                // 2) Discord bot API fallback (no live presence)
+                const user = await fetchDiscordUser(discordId);
+                if (user) {
+                    return {
+                        discordId: user.id,
+                        username: user.username,
+                        globalName: user.global_name || user.username,
+                        avatar: buildOwnerAvatar(discordId, user.avatar ?? null),
+                        avatarHash: user.avatar ?? null,
+                        role: meta.role,
+                        status: "offline" as const,
+                        activities: [],
+                        spotify: null,
+                    };
+                }
+
+                // 3) Static fallback
                 return {
-                    discordId: user.id,
-                    username: user.username,
-                    globalName: user.global_name || user.username,
-                    avatar: user.avatar
-                        ? `https://cdn.discordapp.com/avatars/${discordId}/${user.avatar}.${ext}?size=128`
-                        : `https://cdn.discordapp.com/embed/avatars/${
-                            Number(BigInt(discordId) >> 22n) % 6
-                          }.png`,
-                    avatarHash: user.avatar,
+                    discordId,
+                    username: meta.fallbackName,
+                    globalName: meta.fallbackName,
+                    avatar: defaultEmbedAvatar(discordId),
+                    avatarHash: null,
                     role: meta.role,
+                    status: "offline" as const,
+                    activities: [],
+                    spotify: null,
                 };
             })
         );
@@ -54,6 +74,17 @@ export async function getOwners(req: Request, res: Response) {
         console.error(e);
         res.status(500).json({ success: false, error: "Failed to fetch owners" });
     }
+}
+
+function defaultEmbedAvatar(discordId: string): string {
+    const idx = Number(BigInt(discordId) >> 22n) % 6;
+    return `https://cdn.discordapp.com/embed/avatars/${idx}.png`;
+}
+
+function buildOwnerAvatar(discordId: string, avatarHash: string | null | undefined): string {
+    if (!avatarHash) return defaultEmbedAvatar(discordId);
+    const ext = avatarHash.startsWith("a_") ? "gif" : "webp";
+    return `https://cdn.discordapp.com/avatars/${discordId}/${avatarHash}.${ext}?size=128`;
 }
 
 export async function getGroupedCommands(req: Request, res: Response) {
