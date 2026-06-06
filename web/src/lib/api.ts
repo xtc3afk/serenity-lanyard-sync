@@ -1,4 +1,6 @@
-export const API_BASE = "https://api.whimper.wtf"; // or http://localhost:3000 for dev
+// Override via VITE_API_BASE in web/.env (e.g. http://localhost:3000 for local dev)
+export const API_BASE =
+  (import.meta.env.VITE_API_BASE as string | undefined) ?? "https://api.whimper.wtf";
 
 export type WhimperUser = {
   username: string;
