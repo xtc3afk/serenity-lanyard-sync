@@ -1,5 +1,3 @@
-import puppeteer from "puppeteer";
-
 const PROFILE_URL =
     "https://rocketleague.tracker.network/rocket-league/profile/epic/hitselecting/overview";
 
@@ -13,7 +11,8 @@ export type RocketLeagueStats = {
 };
 
 export async function scrapeRocketLeague(): Promise<RocketLeagueStats> {
-    const browser = await puppeteer.launch({
+    const puppeteer: any = await import("puppeteer");
+    const browser = await puppeteer.default.launch({
         headless: true,
         args: ["--no-sandbox", "--disable-setuid-sandbox"],
     });
