@@ -92,8 +92,20 @@ async function initTables() {
     console.log('⚡ PostgreSQL tables initialized');
 }
 
-export const db = {
-    query: (text: string, params?: any[]) => pool.query(text, params),
+export const db: any = {
+    query: async (text: string, params?: any[]): Promise<any> => {
+        const { rows } = await pool.query(text, params);
+        // Return array of rows; also expose first-row properties for legacy
+        // single-document callers via a Proxy. Iteration/map/filter still work.
+        return new Proxy(rows, {
+            get(target: any, prop: any) {
+                if (prop in target) return target[prop];
+                const first = target[0];
+                if (first && prop in first) return first[prop];
+                return undefined;
+            },
+        });
+    },
     
     // Helper methods to mimic old collections
     users: () => ({
