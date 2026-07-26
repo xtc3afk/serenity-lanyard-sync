@@ -51,7 +51,9 @@ async function start() {
         console.error("⚠️  Starting without PostgreSQL:", (e as Error).message);
     }
 
-    const PORT = process.env.PORT || 3000;
+    const argPortIdx = process.argv.indexOf("--port");
+    const argPort = argPortIdx !== -1 ? process.argv[argPortIdx + 1] : null;
+    const PORT = argPort || process.env.PORT || 3000;
     app.listen(PORT, () => {
         console.log(`🚀 Server running on port ${PORT}`);
         console.log(`📡 YouTube Proxy endpoint: /api/user/youtube-proxy`);
