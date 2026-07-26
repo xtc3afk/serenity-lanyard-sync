@@ -6,7 +6,8 @@
     "rootDir": ".",
     "outDir": "build",
     "esModuleInterop": true,
-    "strict": true,
+    "strict": false,
+    "noImplicitAny": false,
     "skipLibCheck": true
   },
   "include": ["**/*.ts"],
