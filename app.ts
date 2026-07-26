@@ -10,7 +10,7 @@ import userRouter from "./routes/user.routes";
 import guildRouter from "./routes/guild.routes";
 import adminRouter from "./routes/admin.routes";
 import publicRouter from "./routes/index";
-require("./jobs/rocketleague.job");
+require("./jobs/rl.job");
 
 const app = express();
 
