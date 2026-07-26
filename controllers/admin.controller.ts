@@ -1,18 +1,14 @@
 import { Request, Response } from "express";
-import { collections } from "../services/mongo.service";
+import { db } from "../services/db.service";
 import { clearStatsCache } from "../services/cache.service";
-import { ObjectId } from "mongodb";
+import crypto from "crypto";
 
 export async function refreshStats(req: Request, res: Response) {
     try {
-        const users = await collections.users().countDocuments();
-        const servers = await collections.guilds().countDocuments();
+        const users = await db.query('SELECT COUNT(*) FROM users');
+        const servers = await db.query('SELECT COUNT(*) FROM guilds');
 
-        await collections.stats().updateOne(
-            { _id: "dashboard" as any },
-            { $set: { users, servers, updatedAt: new Date() } },
-            { upsert: true }
-        );
+        await db.query('UPDATE stats SET users = $1, servers = $2, updatedAt = $3 WHERE _id = $4', [users, servers, new Date(), "dashboard"]);
 
         clearStatsCache();
 
@@ -24,7 +20,6 @@ export async function refreshStats(req: Request, res: Response) {
 }
 
 export async function syncGuilds(req: Request, res: Response) {
-    try {
         const response = await fetch("https://discord.com/api/v10/users/@me/guilds", {
             headers: { Authorization: `Bot ${process.env.DISCORD_BOT_TOKEN}` },
         });
@@ -33,56 +28,26 @@ export async function syncGuilds(req: Request, res: Response) {
 
         const guilds: any[] = await response.json();
 
-        await collections.guilds().bulkWrite(
-            guilds.map((g: any) => ({
-                updateOne: {
-                    filter: { guildId: g.id },
-                    update: {
-                        $set: {
-                            guildId: g.id,
-                            name: g.name,
-                            icon: g.icon,
-                            memberCount: g.approximate_member_count,
-                            updatedAt: new Date()
-                        },
-                        $setOnInsert: { joinedAt: new Date() },
-                    },
-                    upsert: true,
-                },
-            }))
-        );
+        guilds.forEach(async (guild: any) => {
+        await db.query('INSERT INTO guilds (guildId, name, icon, memberCount, joinedAt, updatedAt) VALUES ($1, $2, $3, $4, $5, $6)', [guild.id, guild.name, guild.icon, guild.approximate_member_count, new Date(), new Date()]);
+    });
 
-        res.json({ success: true, synced: guilds.length });
-    } catch (e) {
-        console.error(e);
-        res.status(500).json({ success: false, error: "sync failed" });
-    }
+    res.json({ success: true, synced: guilds.length });
 }
 
 export async function getAdminGuilds(req: Request, res: Response) {
-    const guilds = await collections.guilds()
-        .find({})
-        .sort({ joinedAt: -1 })
-        .toArray();
-
+    const guilds = await db.query('SELECT * FROM guilds ORDER BY joinedAt DESC');
     res.json({ success: true, guilds });
 }
-
 export async function getAdminWarns(req: Request, res: Response) {
     const filter: any = {};
     if (req.query.guildId) filter.guildId = req.query.guildId;
-
-    const warns = await collections.warns()
-        .find(filter)
-        .sort({ createdAt: -1 })
-        .limit(200)
-        .toArray();
-
+    const warns = await db.query('SELECT * FROM warns WHERE guildId = $1 ORDER BY createdAt DESC LIMIT 200', [filter.guildId]);
     res.json({ success: true, warns });
 }
 
 export async function deleteWarn(req: Request, res: Response) {
-    await collections.warns().deleteOne({ _id: new ObjectId(req.params.id) });
+    await db.query('DELETE FROM warns WHERE id = $1', [req.params.id]);
     res.json({ success: true });
 }
 
@@ -90,53 +55,32 @@ export async function getAdminAppeals(req: Request, res: Response) {
     const filter: any = {};
     if (req.query.status) filter.status = req.query.status;
 
-    const appeals = await collections.appeals()
-        .find(filter)
-        .sort({ createdAt: -1 })
-        .limit(100)
-        .toArray();
+    const appeals = await db.query('SELECT * FROM appeals WHERE status = $1 ORDER BY createdAt DESC LIMIT 100', [filter.status]);
 
     res.json({ success: true, appeals });
 }
 
 export async function approveAppeal(req: Request, res: Response) {
-    const appeal = await collections.appeals().findOne({ _id: new ObjectId(req.params.id) });
+    const appeal = await db.query('SELECT * FROM appeals WHERE id = $1', [req.params.id]);
     if (!appeal) return res.status(404).json({ success: false, error: "appeal not found" });
 
-    await collections.appeals().updateOne(
-        { _id: new ObjectId(req.params.id) },
-        { $set: { 
-            status: "approved", 
-            reviewedBy: req.sessionUser!.username, 
-            reviewedAt: new Date() 
-        }}
-    );
+    await db.query('UPDATE appeals SET status = $1, reviewedBy = $2, reviewedAt = $3 WHERE id = $4', ["approved", req.sessionUser!.username, new Date(), req.params.id]);
 
     if (appeal.guildId) {
-        await collections.blockedGuilds().deleteOne({ guildId: appeal.guildId });
+        await db.query('DELETE FROM blockedGuilds WHERE guildId = $1', [appeal.guildId]);
     }
 
     res.json({ success: true });
 }
 
 export async function denyAppeal(req: Request, res: Response) {
-    await collections.appeals().updateOne(
-        { _id: new ObjectId(req.params.id) },
-        { $set: { 
-            status: "denied", 
-            reviewedBy: req.sessionUser!.username, 
-            reviewedAt: new Date() 
-        }}
-    );
+    await db.query('UPDATE appeals SET status = $1, reviewedBy = $2, reviewedAt = $3 WHERE id = $4', ["denied", req.sessionUser!.username, new Date(), req.params.id]);
     res.json({ success: true });
 }
 
 export async function getMyAppeals(req: Request, res: Response) {
     const { discordId } = req.sessionUser!;
-    const appeals = await collections.appeals()
-        .find({ userId: discordId })
-        .sort({ createdAt: -1 })
-        .toArray();
+    const appeals = await db.query('SELECT * FROM appeals WHERE user_id = $1 ORDER BY createdAt DESC', [discordId]);
 
     res.json({ success: true, appeals });
 }
@@ -153,46 +97,24 @@ export async function createAppeal(req: Request, res: Response) {
         return res.status(400).json({ success: false, error: "invalid guild id" });
     }
 
-    const blocked = await collections.blockedGuilds().findOne({ guildId });
+    const blocked = await db.query('SELECT * FROM blockedGuilds WHERE guildId = $1', [guildId]);
     if (!blocked) {
         return res.status(400).json({ success: false, error: "that server is not blocked" });
     }
 
-    const existing = await collections.appeals().findOne({ 
-        userId: discordId, 
-        guildId, 
-        status: "pending" 
-    });
+    const existing = await db.query('SELECT * FROM appeals WHERE userId = $1 AND guildId = $2 AND status = $3', [discordId, guildId, "pending"]);
 
     if (existing) {
         return res.status(409).json({ success: false, error: "you already have a pending appeal" });
     }
 
-    await collections.appeals().updateOne(
-        { userId: discordId, guildId },
-        { 
-            $set: { 
-                userId: discordId, 
-                guildId, 
-                reason: reason.slice(0, 1000), 
-                status: "pending", 
-                reviewedBy: null, 
-                reviewedAt: null, 
-                updatedAt: new Date() 
-            }, 
-            $setOnInsert: { createdAt: new Date() } 
-        },
-        { upsert: true }
-    );
+    await db.query('INSERT INTO appeals (userId, guildId, reason, status, reviewedBy, reviewedAt, updatedAt, createdAt) VALUES ($1, $2, $3, $4, $5, $6, $7, $8)', [discordId, guildId, reason.slice(0, 1000), "pending", null, null, new Date(), new Date()]);
 
     res.json({ success: true });
 }
 
 export async function getBlockedGuilds(req: Request, res: Response) {
-    const blocked = await collections.blockedGuilds()
-        .find({})
-        .sort({ createdAt: -1 })
-        .toArray();
+    const blocked = await db.query('SELECT * FROM blockedGuilds ORDER BY createdAt DESC');
 
     res.json({ success: true, blocked });
 }
@@ -201,17 +123,12 @@ export async function blockGuild(req: Request, res: Response) {
     const { guildId, reason } = req.body;
     if (!guildId) return res.status(400).json({ success: false, error: "guildId required" });
 
-    await collections.blockedGuilds().updateOne(
-        { guildId },
-        { $set: { guildId, reason: reason ?? null, createdAt: new Date() } },
-        { upsert: true }
-    );
-
+    await db.query('INSERT INTO blockedGuilds (guildId, reason, createdAt) VALUES ($1, $2, $3)', [guildId, reason, new Date()]);
     res.json({ success: true });
 }
 
 export async function unblockGuild(req: Request, res: Response) {
-    await collections.blockedGuilds().deleteOne({ guildId: req.params.guildId });
+    await db.query('DELETE FROM blockedGuilds WHERE guildId = $1', [req.params.guildId]);
     res.json({ success: true });
 }
 export async function setAnnouncement(req: Request, res: Response) {
@@ -219,23 +136,50 @@ export async function setAnnouncement(req: Request, res: Response) {
     if (!title || !message) {
         return res.status(400).json({ success: false, error: "title and message required" });
     }
-    await collections.announcements().updateOne(
-        { active: true },
-        {
-            $set: {
-                title,
-                message,
-                color: color || "#3b82f6",
-                updatedAt: new Date(),
-                active: true,
-            },
-        },
-        { upsert: true }
-    );
+    await db.query('INSERT INTO announcements (title, message, color, updatedAt, active) VALUES ($1, $2, $3, $4, $5)', [title, message, color || "#3b82f6", new Date(), true]);
     res.json({ success: true });
 }
 
 export async function deleteAnnouncement(_req: Request, res: Response) {
-    await collections.announcements().deleteOne({ active: true });
+    await db.query('DELETE FROM announcements WHERE active = true');
     res.json({ success: true });
+}
+
+// ==================== API KEYS ====================
+
+export async function getApiKeys(req: Request, res: Response) {
+    try {
+        const keys = await db.query('SELECT * FROM apikeys ORDER BY createdAt DESC');
+        res.json({ success: true, keys });
+    } catch (e) {
+        console.error(e);
+        res.status(500).json({ success: false, error: "Failed to fetch API keys" });
+    }
+}
+
+export async function createApiKey(req: Request, res: Response) {
+    try {
+        const { name } = req.body;
+        if (!name || typeof name !== "string" || name.trim().length < 3) {
+            return res.status(400).json({ success: false, error: "Name must be at least 3 characters" });
+        }
+
+        const key = "cobalt_" + crypto.randomBytes(24).toString("hex");
+
+        await db.query('INSERT INTO apikeys (name, key, createdBy, createdAt) VALUES ($1, $2, $3, $4)', [name.trim(), key, req.sessionUser!.discordId, new Date()]);
+        res.json({ success: true, key });
+    } catch (e) {
+        console.error(e);
+        res.status(500).json({ success: false, error: "Failed to create API key" });
+    }
+}
+
+export async function deleteApiKey(req: Request, res: Response) {
+    try {
+        await db.query('DELETE FROM apikeys WHERE id = $1', [req.params.id]);
+        res.json({ success: true });
+    } catch (e) {
+        console.error(e);
+        res.status(500).json({ success: false, error: "Failed to delete API key" });
+    }
 }

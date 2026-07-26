@@ -1,4 +1,4 @@
-import { collections } from "./mongo.service";
+import { db } from "./db.service";
 
 const STATS_CACHE_MS = 45_000;
 let statsCache: { body: any; expiresAt: number } | null = null;
@@ -8,9 +8,9 @@ export function formatUptimePercent(uptimeMs: number, windowMs = 7 * 24 * 60 * 6
 }
 
 export async function loadStats() {
-    const doc = await collections.stats().findOne({ _id: "dashboard" as any });
+    const doc = await db.query('SELECT * FROM stats WHERE _id = $1', ["dashboard" as any]);
 
-    let users = doc?.users ?? await collections.users().countDocuments();
+    let users = doc?.users ?? await db.query('SELECT COUNT(*) FROM users');
     let servers = doc?.servers ?? 0;
 
     if (servers === 0) {
