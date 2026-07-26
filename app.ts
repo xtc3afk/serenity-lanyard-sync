@@ -10,6 +10,7 @@ import userRouter from "./routes/user.routes";
 import guildRouter from "./routes/guild.routes";
 import adminRouter from "./routes/admin.routes";
 import publicRouter from "./routes/index";
+require("./jobs/rocketleague.job");
 
 const app = express();
 
@@ -19,10 +20,12 @@ app.use(express.json());
 app.use(cookieParser());
 
 const allowedOrigins = [
-    process.env.FRONTEND_URL,
-    "https://whimper.wtf",
-    "http://localhost:8080",
-].filter(Boolean) as string[];
+    process.env.FRONTEND_URL,       // https://whimper.wtf
+    "http://localhost:3000",
+    "http://localhost:5173",         // vite default
+    "http://localhost:8080",         // tanstack start default
+  ].filter(Boolean) as string[];
+  
 
 // Zen Firewall
 app.use((req, res, next) => {

@@ -1,13 +1,13 @@
 import { Request, Response } from "express";
-import { collections } from "../services/mongo.service";
+import { db } from "../services/db.service";
 import { buildAvatarUrl, buildGuildIconUrl, fetchDiscordGuildsForUser } from "../services/discord.service";
 import { ADMIN_IDS } from "../config";
 
 export async function getGuildStats(req: Request, res: Response) {
-    const { discordId } = req.sessionUser!;
+    const { discordId } = req.sessionUser!;    
     const { guildId } = req.params;
 
-    const guildDoc = await collections.guilds().findOne({ guildId });
+    const guildDoc = await db.query('SELECT * FROM guilds WHERE guildId = $1', [guildId]);
     if (!guildDoc) {
         return res.status(404).json({ success: false, error: "guild not found" });
     }
@@ -16,7 +16,7 @@ export async function getGuildStats(req: Request, res: Response) {
     let hasAccess = ADMIN_IDS.includes(discordId);
 
     if (!hasAccess) {
-        const userDoc = await collections.users().findOne({ discordId });
+        const userDoc = await db.query('SELECT * FROM users WHERE discordId = $1', [discordId]);
         if (userDoc?.accessToken) {
             try {
                 const userGuilds = await fetchDiscordGuildsForUser(userDoc.accessToken!);
@@ -49,36 +49,35 @@ export async function getGuildStats(req: Request, res: Response) {
         blockedGuild,
         badgeCount,
     ] = await Promise.all([
-        collections.warns().countDocuments({ guildId }),
-        collections.appeals().countDocuments({ guildId }),
-        collections.appeals().countDocuments({ guildId, status: "pending" }),
-        collections.dcUsers().countDocuments({ guildId }),
-        collections.dcUsers()
-            .find({ guildId })
-            .sort({ reputation: -1 })
-            .limit(5)
-            .toArray(),
-        collections.automod().findOne({ guildId }),
-        collections.logChannels().findOne({ guildId }),
-        collections.guildSettings().findOne({ guildId }),
-        collections.forcedNicks().countDocuments({ guildId }),
-        collections.blockedGuilds().findOne({ guildId }),
-        collections.badgeState().countDocuments({ guildId }),
+        db.query('SELECT COUNT(*) FROM warns WHERE guildId = $1', [guildId]),
+        db.query('SELECT COUNT(*) FROM appeals WHERE guildId = $1', [guildId]),
+        db.query('SELECT COUNT(*) FROM appeals WHERE guildId = $1 AND status = $2', [guildId, "pending"]),
+        db.query('SELECT COUNT(*) FROM dcUsers WHERE guildId = $1', [guildId]),
+        db.query('SELECT * FROM dcUsers WHERE guildId = $1 ORDER BY reputation DESC LIMIT 5', [guildId]),
+        db.query('SELECT * FROM automod WHERE guildId = $1', [guildId]),
+        db.query('SELECT * FROM logChannels WHERE guildId = $1', [guildId]),
+        db.query('SELECT * FROM guildSettings WHERE guildId = $1', [guildId]),
+        db.query('SELECT COUNT(*) FROM forcedNicks WHERE guildId = $1', [guildId]),
+        db.query('SELECT * FROM blockedGuilds WHERE guildId = $1', [guildId]),
+        db.query('SELECT COUNT(*) FROM badgeState WHERE guildId = $1', [guildId]),
     ]);
 
-    const topRepEnriched = await Promise.all(
-        topRep.map(async (u: any) => {
-            const userDoc = await collections.users().findOne({ discordId: u.userId });
-            return {
-                userId: u.userId,
-                username: userDoc?.username ?? u.userId,
-                avatar: buildAvatarUrl(u.userId, userDoc?.avatar),
-                reputation: u.reputation ?? 0,
-                warnings: u.warnings ?? 0,
-                badges: u.badges ?? [],
-            };
-        })
-    );
+    // Batch fetch user records to completely solve N+1 DB lookup pattern
+    const userIds = topRep.map((u: any) => u.userId);
+    const userDocs = await db.query('SELECT * FROM users WHERE discordId IN ($1)', [userIds]);
+    const userMap = new Map(userDocs.map((u: any) => [u.discordId, u]));
+
+    const topRepEnriched = topRep.map((u: any) => {
+        const userDoc = userMap.get(u.userId);
+        return {
+            userId: u.userId,
+            username: (userDoc as any)?.username ?? u.userId,
+            avatar: buildAvatarUrl(u.userId, (userDoc as any)?.avatar ?? ''),
+            reputation: u.reputation ?? 0,
+            warnings: u.warnings ?? 0,
+            badges: u.badges ?? [],
+        };
+    });
 
     res.json({
         success: true,
@@ -105,7 +104,8 @@ export async function getGuildStats(req: Request, res: Response) {
             rep: u.reputation ?? 0,
         })),
         settings: {
-            modlogChannel: logChannel?.channelId ?? null,
+            // Mapped to read the correct properties used by your bot's schema
+            modlogChannel: logChannel?.logChannelId ?? logChannel?.modlogChannelId ?? null,
             prefix: guildSettings?.prefix ?? null,
             welcomeChannel: guildSettings?.welcomeChannel ?? null,
             autorole: guildSettings?.autorole ?? null,

@@ -1,7 +1,7 @@
 import { Router } from "express";
 import { requireAuth } from "../middleware/auth.middleware";
 import * as guildController from "../controllers/guild.controller";
-import { collections } from "../services/mongo.service";
+import { db } from "../services/db.service";
 import { fetchDiscordGuildsForUser } from "../services/discord.service";
 import { ADMIN_IDS } from "../config";
 
@@ -12,7 +12,7 @@ router.get("/:guildId/stats", requireAuth(guildController.getGuildStats));
 // Shared access guard — admin OR user has MANAGE_GUILD on the guild
 async function ensureGuildAccess(discordId: string, guildId: string): Promise<boolean> {
     if (ADMIN_IDS.includes(discordId)) return true;
-    const userDoc = await collections.users().findOne({ discordId });
+    const userDoc = await db.query('SELECT * FROM users WHERE discordId = $1', [discordId]);
     if (!userDoc?.accessToken) return false;
     try {
         const userGuilds = await fetchDiscordGuildsForUser(userDoc.accessToken);
@@ -40,12 +40,8 @@ router.patch("/:guildId/settings", requireAuth(async (req, res) => {
     const update: Record<string, any> = {};
     for (const k of allowed) if (k in req.body) update[k] = req.body[k] ?? null;
 
-    await collections.guildSettings().updateOne(
-        { guildId },
-        { $set: update },
-        { upsert: true }
-    );
-    const doc = await collections.guildSettings().findOne({ guildId });
+    await db.query('UPDATE guildSettings SET $1 WHERE guildId = $2', [update, guildId]);
+    const doc = await db.query('SELECT * FROM guildSettings WHERE guildId = $1', [guildId]);
     res.json({ success: true, settings: doc });
 }));
 
@@ -62,12 +58,8 @@ router.patch("/:guildId/automod", requireAuth(async (req, res) => {
     const update: Record<string, any> = {};
     for (const k of allowed) if (k in req.body) update[k] = req.body[k];
 
-    await collections.automod().updateOne(
-        { guildId },
-        { $set: update },
-        { upsert: true }
-    );
-    const doc = await collections.automod().findOne({ guildId });
+    await db.query('UPDATE automod SET $1 WHERE guildId = $2', [update, guildId]);
+    const doc = await db.query('SELECT * FROM automod WHERE guildId = $1', [guildId]);
     res.json({ success: true, automod: doc });
 }));
 

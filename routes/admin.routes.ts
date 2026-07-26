@@ -26,4 +26,9 @@ router.delete("/announcement", requireAdmin(adminController.deleteAnnouncement))
 router.get("/appeals/my", requireAuth(adminController.getMyAppeals));
 router.post("/appeals", requireAuth(adminController.createAppeal));
 
+// Add these at the bottom with other admin routes
+router.get("/apikeys", requireAdmin(adminController.getApiKeys));
+router.post("/apikeys", requireAdmin(adminController.createApiKey));
+router.delete("/apikeys/:id", requireAdmin(adminController.deleteApiKey));
+
 export default router;

@@ -1,6 +1,6 @@
 import { Request, Response } from "express";
 import crypto from "crypto";
-import { collections } from "../services/mongo.service";
+import { db } from "../services/db.service";
 import { buildGuildIconUrl, fetchDiscordGuildsForUser } from "../services/discord.service";
 import { buildAvatarUrl } from "../services/discord.service";
 import { getSessionUser } from "../middleware/auth.middleware";
@@ -24,8 +24,16 @@ export async function login(req: Request, res: Response) {
     );
 }
 
+export async function userInstall(req: Request, res: Response) {
+    res.redirect(
+        `https://discord.com/api/oauth2/authorize?` +
+        `client_id=${process.env.DISCORD_CLIENT_ID}` +
+        `&integration_type=1` +
+        `&scope=applications.commands`
+    );
+}
+
 export async function callback(req: Request, res: Response) {
-    try {
         const { code, state } = req.query;
         if (!code) return res.status(400).send("No code");
         if (req.cookies?.oauth_state !== state) return res.status(403).send("Invalid state");
@@ -51,28 +59,9 @@ export async function callback(req: Request, res: Response) {
         const discordUser = await userRes.json();
         if (!userRes.ok) return res.status(400).json(discordUser);
 
-        await collections.users().updateOne(
-            { discordId: discordUser.id },
-            {
-                $set: {
-                    discordId: discordUser.id,
-                    username: discordUser.username,
-                    globalName: discordUser.global_name ?? discordUser.username,
-                    avatar: discordUser.avatar,
-                    accessToken: tokenData.access_token,
-                    updatedAt: new Date(),
-                },
-            },
-            { upsert: true }
-        );
-
+        await db.query('UPDATE users SET discordId = $1, username = $2, globalName = $3, avatar = $4, accessToken = $5, updatedAt = $6 WHERE discordId = $1', [discordUser.id, discordUser.username, discordUser.global_name ?? discordUser.username, discordUser.avatar, tokenData.access_token, new Date()]);
         const sessionId = crypto.randomBytes(32).toString("hex");
-        await collections.sessions().insertOne({
-            sessionId,
-            discordId: discordUser.id,
-            createdAt: new Date(),
-            expiresAt: new Date(Date.now() + 7 * 24 * 60 * 60 * 1000),
-        });
+        await db.query('INSERT INTO sessions (sessionId, discordId, createdAt, expiresAt) VALUES ($1, $2, $3, $4)', [sessionId, discordUser.id, new Date(), new Date(Date.now() + 7 * 24 * 60 * 60 * 1000)]);
 
         res.cookie("session_id", sessionId, {
             httpOnly: true,
@@ -82,9 +71,80 @@ export async function callback(req: Request, res: Response) {
         });
         res.clearCookie("oauth_state");
         res.redirect(process.env.FRONTEND_URL!);
+}
+
+// --- NEW VALORANT CONNECTIONS FLOWS ---
+
+export async function connectionsLogin(req: Request, res: Response) {
+    const state = crypto.randomBytes(16).toString("hex");
+    res.cookie("oauth_state", state, {
+        httpOnly: true,
+        secure: true,
+        sameSite: "lax",
+        maxAge: 10 * 60 * 1000
+    });
+
+    const connectionsRedirectUri = process.env.DISCORD_CONNECTIONS_REDIRECT_URI || 
+        (process.env.DISCORD_REDIRECT_URI ? process.env.DISCORD_REDIRECT_URI.replace("/discord/callback", "/connections/callback") : "");
+
+    res.redirect(
+        `https://discord.com/api/oauth2/authorize?` +
+        `client_id=${process.env.DISCORD_CLIENT_ID}` +
+        `&redirect_uri=${encodeURIComponent(connectionsRedirectUri)}` +
+        `&response_type=code` +
+        `&scope=connections%20identify` +
+        `&state=${state}`
+    );
+}
+
+export async function connectionsCallback(req: Request, res: Response) {
+    try {
+        const { code, state } = req.query;
+        if (!code) return res.status(400).send("No code");
+        if (req.cookies?.oauth_state !== state) return res.status(403).send("Invalid state");
+
+        // The user is already logged in with a session cookie, find who they are
+        const sessionUser = await getSessionUser(req);
+        if (!sessionUser) {
+            return res.status(401).send("You must be signed in to link accounts.");
+        }
+
+        const connectionsRedirectUri = process.env.DISCORD_CONNECTIONS_REDIRECT_URI || 
+            (process.env.DISCORD_REDIRECT_URI ? process.env.DISCORD_REDIRECT_URI.replace("/discord/callback", "/connections/callback") : "");
+
+        const tokenRes = await fetch("https://discord.com/api/oauth2/token", {
+            method: "POST",
+            headers: { "Content-Type": "application/x-www-form-urlencoded" },
+            body: new URLSearchParams({
+                client_id: process.env.DISCORD_CLIENT_ID!,
+                client_secret: process.env.DISCORD_CLIENT_SECRET!,
+                grant_type: "authorization_code",
+                code: code as string,
+                redirect_uri: connectionsRedirectUri,
+            }),
+        });
+
+        const tokenData = await tokenRes.json();
+        if (!tokenRes.ok) return res.status(400).json(tokenData);
+
+        // Fetch User's Connections from Discord API
+        const connRes = await fetch("https://discord.com/api/users/@me/connections", {
+            headers: { Authorization: `Bearer ${tokenData.access_token}` },
+        });
+        const connections = await connRes.json();
+        if (!connRes.ok) return res.status(400).json(connections);
+
+        const riot = connections.find((c: any) => c.type === "riotgames");
+
+        if (riot) {
+            await db.query('UPDATE users SET riotConnection = $1 WHERE discordId = $2', [riot, sessionUser.discordId]);
+        }
+
+        res.clearCookie("oauth_state");
+        res.redirect(`${process.env.FRONTEND_URL}/valorant`);
     } catch (e) {
         console.error(e);
-        res.status(500).send("Login failed");
+        res.status(500).send("Linking Riot Games account failed.");
     }
 }
 
@@ -92,7 +152,7 @@ export async function me(req: Request, res: Response) {
     const sessionUser = await getSessionUser(req);
     if (!sessionUser) return res.json({ user: null });
 
-    const userDoc = await collections.users().findOne({ discordId: sessionUser.discordId });
+    const userDoc = await db.query('SELECT * FROM users WHERE discordId = $1', [sessionUser.discordId]);
     if (!userDoc) return res.json({ user: null });
 
     res.json({
@@ -110,7 +170,7 @@ export async function me(req: Request, res: Response) {
 export async function meGuilds(req: Request, res: Response) {
     const { discordId } = req.sessionUser!;
 
-    const userDoc = await collections.users().findOne({ discordId });
+    const userDoc = await db.query('SELECT * FROM users WHERE discordId = $1', [discordId]);
     if (!userDoc?.accessToken) {
         return res.status(400).json({
             success: false,
@@ -121,14 +181,14 @@ export async function meGuilds(req: Request, res: Response) {
     const discordGuilds = await fetchDiscordGuildsForUser(userDoc.accessToken);
 
     const botGuildIds = new Set(
-        (await collections.guilds().find({}, { projection: { guildId: 1 } }).toArray())
+        (await db.query('SELECT guildId FROM guilds'))
             .map((g: any) => g.guildId)
     );
 
     const guilds = discordGuilds.map((g: any) => ({
         id: g.id,
         name: g.name,
-        icon: buildGuildIconUrl(g.id, g.icon), // Note: function is in discord.service
+        icon: buildGuildIconUrl(g.id, g.icon),
         owner: g.owner as boolean,
         permissions: g.permissions,
         memberCount: g.approximate_member_count ?? null,
@@ -141,7 +201,7 @@ export async function meGuilds(req: Request, res: Response) {
 export async function logout(req: Request, res: Response) {
     const sessionId = req.cookies?.session_id;
     if (sessionId) {
-        await collections.sessions().deleteOne({ sessionId });
+        await db.query('DELETE FROM sessions WHERE sessionId = $1', [sessionId]);
     }
     res.clearCookie("session_id");
 

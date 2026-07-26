@@ -1,4 +1,4 @@
-import { collections, db } from "./mongo.service";
+import { db } from "./db.service";
 
 const CHECK_INTERVAL_MS = 60_000;
 const HISTORY_MS = 30 * 24 * 60 * 60 * 1000;
@@ -12,10 +12,10 @@ interface ServiceDef {
 }
 
 const SERVICES: ServiceDef[] = [
-    { id: "website", name: "Website", description: "whimper.wtf frontend" },
-    { id: "api", name: "API", description: "api.whimper.wtf" },
-    { id: "bot", name: "Discord Bot", description: "Gateway & commands" },
-    { id: "database", name: "Database", description: "MongoDB cluster" },
+    { id: "website", name: "Website", description: "whimper.wtf site" },
+    { id: "api", name: "API", description: "api" },
+    { id: "bot", name: "Discord Bot", description: "whimper bot" },
+    { id: "database", name: "Database", description: "postgresql db" },
 ];
 
 let monitorTimer: ReturnType<typeof setInterval> | null = null;
@@ -67,7 +67,7 @@ async function checkBot() {
 async function checkDatabase() {
     const start = Date.now();
     try {
-        await db.admin().command({ ping: 1 });
+        await db.query('SELECT 1');
         return { ok: true, latencyMs: Date.now() - start };
     } catch {
         return { ok: false, latencyMs: Date.now() - start };
@@ -82,31 +82,22 @@ async function recordCheck(serviceId: ServiceId, ok: boolean, latencyMs: number 
     const checkedAt = new Date();
     latest.set(serviceId, { ok, latencyMs, checkedAt });
 
-    await collections.statusChecks().insertOne({
-        serviceId,
-        ok,
-        latencyMs,
-        at: checkedAt,
-    });
+    await db.query('INSERT INTO statusChecks (serviceId, ok, latencyMs, at) VALUES ($1, $2, $3, $4)', [serviceId, ok, latencyMs, checkedAt]);
 
     const cutoff = new Date(Date.now() - HISTORY_MS);
-    await collections.statusChecks().deleteMany({ at: { $lt: cutoff } });
+    await db.query('DELETE FROM statusChecks WHERE at < $1', [cutoff]);
 }
 
 async function uptimePercent(serviceId: ServiceId, windowMs: number): Promise<number | null> {
     const since = new Date(Date.now() - windowMs);
-    const checks = await collections
-        .statusChecks()
-        .find({ serviceId, at: { $gte: since } })
-        .toArray();
-
+    const checks = await db.query('SELECT * FROM statusChecks WHERE serviceId = $1 AND at >= $2', [serviceId, since]);
     if (checks.length === 0) return null;
 
-    const up = checks.filter((c) => c.ok).length;
+    const up = checks.filter((c: any) => c.ok).length;
     return Math.round((up / checks.length) * 10000) / 100;
 }
 
-async function dailyUptime(serviceId: ServiceId, days: number) {
+async function dailyUptime(serviceId: ServiceId, days: number): Promise<{ date: string; uptime: number }[]> {
     const result: { date: string; uptime: number }[] = [];
     const now = new Date();
 
@@ -118,19 +109,14 @@ async function dailyUptime(serviceId: ServiceId, days: number) {
         const dayEnd = new Date(dayStart);
         dayEnd.setUTCDate(dayEnd.getUTCDate() + 1);
 
-        const checks = await collections
-            .statusChecks()
-            .find({ serviceId, at: { $gte: dayStart, $lt: dayEnd } })
-            .toArray();
-
+        const checks = await db.query('SELECT * FROM statusChecks WHERE serviceId = $1 AND at >= $2 AND at < $3', [serviceId, dayStart, dayEnd]);
         const date = dayStart.toISOString().slice(0, 10);
         if (checks.length === 0) {
             result.push({ date, uptime: -1 });
-            continue;
+        } else {
+            const up = checks.filter((c: any) => c.ok).length;
+            result.push({ date, uptime: Math.round((up / checks.length) * 10000) / 100 });
         }
-
-        const up = checks.filter((c) => c.ok).length;
-        result.push({ date, uptime: Math.round((up / checks.length) * 10000) / 100 });
     }
 
     return result;
